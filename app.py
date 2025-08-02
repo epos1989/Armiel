@@ -3,7 +3,6 @@ import re
 import zipfile
 import uuid
 import sys
-import requests
 from flask import Flask, request, render_template, send_from_directory, jsonify
 from werkzeug.utils import secure_filename
 from bs4 import BeautifulSoup
@@ -12,13 +11,15 @@ import pytesseract
 from deep_translator import GoogleTranslator
 from fpdf import FPDF
 import io
+import requests
+from requests_html import HTMLSession  # NEU
 
-# Logging helper: sofort flushen, damit es in Render-Logs erscheint
+# Logging helper
 def log(s):
     print(s)
     sys.stdout.flush()
 
-# Tesseract-Pfad (bei Bedarf anpassen, Render sollte "tesseract" im PATH haben)
+# Tesseract konfigurieren
 pytesseract.pytesseract.tesseract_cmd = os.environ.get("TESSERACT_CMD", "tesseract")
 
 app = Flask(__name__)
@@ -26,66 +27,49 @@ app.config['UPLOAD_FOLDER'] = "output"
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 def download_images_from_chapter(url, outdir):
+    os.makedirs(outdir, exist_ok=True)
+    session = HTMLSession()
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
         "Referer": url
     }
+
+    log(f"[INFO] Lade Seite: {url}")
     try:
-        r = requests.get(url, headers=headers, timeout=15)
-        r.raise_for_status()
+        r = session.get(url, headers=headers)
+        r.html.render(timeout=20)  # JavaScript ausführen
     except Exception as e:
-        log(f"[DOWNLOAD ERROR] Kapitel-URL laden fehlgeschlagen: {e}")
+        log(f"[ERROR] render() fehlgeschlagen: {e}")
         return 0
 
-    soup = BeautifulSoup(r.text, "html.parser")
-    os.makedirs(outdir, exist_ok=True)
+    images = r.html.find("img")
     count = 1
     seen = set()
 
-    def save_image_from_url(src_url):
-        nonlocal count
-        if src_url in seen:
-            return
-        seen.add(src_url)
+    for img in images:
+        src = img.attrs.get("src") or img.attrs.get("data-src")
+        if not src or not src.startswith("http") or "chapter" not in src:
+            continue
+        if src in seen:
+            continue
+        seen.add(src)
         try:
-            img_resp = requests.get(src_url, headers=headers, timeout=15)
-            img_resp.raise_for_status()
-            content = img_resp.content
-            ext = src_url.split("?")[0].split(".")[-1].lower()
-            if ext == "webp":
-                try:
-                    im = Image.open(io.BytesIO(content)).convert("RGB")
-                    fname = f"{count:03}.jpg"
-                    im.save(os.path.join(outdir, fname), format="JPEG")
-                except Exception as e:
-                    log(f"[CONVERT ERROR] WebP zu JPG fehlgeschlagen: {e}")
-                    return
+            img_data = requests.get(src, headers=headers, timeout=15).content
+            ext = os.path.splitext(src.split("?")[0])[-1]
+            if ext.lower() == ".webp":
+                im = Image.open(io.BytesIO(img_data)).convert("RGB")
+                fname = f"{count:03}.jpg"
+                im.save(os.path.join(outdir, fname), format="JPEG")
             else:
-                fname = f"{count:03}.{ext if ext in ['jpg','jpeg','png'] else 'jpg'}"
+                fname = f"{count:03}.{ext.lstrip('.')}" if ext else f"{count:03}.jpg"
                 with open(os.path.join(outdir, fname), "wb") as f:
-                    f.write(content)
-            log(f"[DOWNLOAD] Bild gespeichert: {fname} from {src_url}")
+                    f.write(img_data)
+            log(f"[✔️] Gespeichert: {fname}")
             count += 1
         except Exception as e:
-            log(f"[IMAGE ERROR] {e} bei {src_url}")
+            log(f"[FEHLER] Bild konnte nicht geladen werden: {e}")
 
-    # Versuch 1: direkte <img>-Quellen
-    for img in soup.find_all("img"):
-        src = img.get("data-src") or img.get("src")
-        if not src or not src.lower().startswith("http"):
-            continue
-        save_image_from_url(src)
-
-    # Versuch 2: Fallback über Regex im Rohtext, falls noch keine Bilder
-    if count == 1:
-        pattern = re.compile(r'(https?://[^"\']+\.(?:jpg|jpeg|png|webp)(?:\?[^"\']*)?)', re.IGNORECASE)
-        matches = pattern.findall(r.text)
-        for src in sorted(set(matches)):
-            if count > 200:
-                break
-            save_image_from_url(src)
-
-    log(f"[RESULT] {count-1} Bilder für {url} gespeichert.")
+    log(f"[RESULT] {count-1} Bilder gespeichert.")
     return count - 1
 
 def ocr_translate_images(image_dir, src, tgt):
@@ -149,7 +133,10 @@ def process():
     for ch in range(start, end + 1):
         chapter_url = f"{url.rstrip('/')}/chapter-{ch}/"
         img_dir = os.path.join(out_root, f"chapter_{ch:02}")
-        download_images_from_chapter(chapter_url, img_dir)
+        num = download_images_from_chapter(chapter_url, img_dir)
+        if num == 0:
+            log(f"[WARNUNG] Keine Bilder gefunden für Kapitel {ch}")
+            continue
         translated = ocr_translate_images(img_dir, src, tgt)
         pdf_path = os.path.join(out_root, f"{title}_Kapitel{ch:02}.pdf")
         create_pdf(translated, pdf_path)
@@ -157,7 +144,7 @@ def process():
         create_cbz(img_dir, cbz_path)
         combined.extend([pdf_path, cbz_path])
 
-        # Debug: Inhalt des Bildordners ausgeben
+        # Debug: Inhalt des Bildordners
         if os.path.isdir(img_dir):
             files = sorted(os.listdir(img_dir))
             log(f"[DEBUG] Inhalt von {img_dir}: {files}")
@@ -178,5 +165,5 @@ def dl(filename):
     return send_from_directory(".", filename, as_attachment=True)
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
