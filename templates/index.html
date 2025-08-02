@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Armiel - Manhwa OCR & Übersetzung</title>
+  <link rel="manifest" href="/manifest.json">
+</head>
+<body>
+  <h1>Armiel</h1>
+  <form id="form">
+    <label>URL: <input name="url" value="https://ravenscans.com/necromancers-evolutionary-traits"></label><br>
+    <label>Start Kapitel: <input name="start" value="1"></label><br>
+    <label>End Kapitel: <input name="end" value="1"></label><br>
+    <label>Quelle (auto/en/ko/ja): <input name="src" value="auto"></label><br>
+    <label>Ziel (de/en/...): <input name="tgt" value="de"></label><br>
+    <button type="submit">Start</button>
+  </form>
+  <div id="out"></div>
+  <script>
+    const form = document.getElementById("form");
+    const out = document.getElementById("out");
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      const data = new FormData(form);
+      out.textContent = "Verarbeitung läuft...";
+      let res = await fetch("/process", {method:"POST", body: data});
+      let j = await res.json();
+      out.innerHTML = `<a href="/download/${j.zip}">Download: ZIP mit PDF/CBZ</a>`;
+    };
+  </script>
+</body>
+</html>
