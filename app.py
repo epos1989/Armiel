@@ -16,10 +16,12 @@ app.config['UPLOAD_FOLDER'] = "output"
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 import re
+from PIL import Image
+import io
 
 def download_images_from_chapter(url, outdir):
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
     }
     try:
         r = requests.get(url, headers=headers, timeout=15)
@@ -28,52 +30,57 @@ def download_images_from_chapter(url, outdir):
         print(f"[DOWNLOAD ERROR] Kapitel-URL laden fehlgeschlagen: {e}")
         return 0
 
-    soup = BeautifulSoup(r.text, 'html.parser')
+    soup = BeautifulSoup(r.text, "html.parser")
     os.makedirs(outdir, exist_ok=True)
     count = 1
     seen = set()
 
-    # Versuch 1: <img> Tags mit src / data-src
-    for img in soup.find_all("img"):
-        src = img.get("data-src") or img.get("src")
-        if not src or not src.startswith("http"):
-            continue
-        if src in seen:
-            continue
-        seen.add(src)
+    def save_image_from_url(src_url):
+        nonlocal count
+        if src_url in seen:
+            return
+        seen.add(src_url)
         try:
-            data = requests.get(src, headers=headers, timeout=15).content
-            fname = f"{count:03}.jpg"
-            with open(os.path.join(outdir, fname), "wb") as f:
-                f.write(data)
-            print(f"[DOWNLOAD] Bild gespeichert: {fname} from {src}")
+            img_resp = requests.get(src_url, headers=headers, timeout=15)
+            img_resp.raise_for_status()
+            content = img_resp.content
+            ext = src_url.split("?")[0].split(".")[-1].lower()
+            if ext == "webp":
+                try:
+                    im = Image.open(io.BytesIO(content)).convert("RGB")
+                    fname = f"{count:03}.jpg"
+                    im.save(os.path.join(outdir, fname), format="JPEG")
+                except Exception as e:
+                    print(f"[CONVERT ERROR] WebP zu JPG fehlgeschlagen: {e}")
+                    return
+            else:
+                fname = f"{count:03}.{ext if ext in ['jpg','jpeg','png'] else 'jpg'}"
+                with open(os.path.join(outdir, fname), "wb") as f:
+                    f.write(content)
+            print(f"[DOWNLOAD] Bild gespeichert: {fname} from {src_url}")
             count += 1
         except Exception as e:
-            print(f"[IMAGE ERROR] {e} bei {src}")
+            print(f"[IMAGE ERROR] {e} bei {src_url}")
 
-    # Versuch 2: Bild-URLs aus JS/HTML-Quelltext extrahieren (Fallback)
+    # Versuch 1: direkte <img> Quellen
+    for img in soup.find_all("img"):
+        src = img.get("data-src") or img.get("src")
+        if not src or not src.lower().startswith("http"):
+            continue
+        save_image_from_url(src)
+
+    # Versuch 2: Fallback per Regex im Rohtext
     if count == 1:
-        # Regex für häufige Bild-Endungen
-        pattern = re.compile(r'(https?://[^"\']+\.(?:jpg|jpeg|png)(?:\?[^"\']*)?)', re.IGNORECASE)
+        pattern = re.compile(r'(https?://[^"\']+\.(?:jpg|jpeg|png|webp)(?:\?[^"\']*)?)', re.IGNORECASE)
         matches = pattern.findall(r.text)
         for src in sorted(set(matches)):
-            if src in seen:
-                continue
-            if count > 200:  # Safety cap
+            if count > 200:
                 break
-            try:
-                data = requests.get(src, headers=headers, timeout=15).content
-                fname = f"{count:03}.jpg"
-                with open(os.path.join(outdir, fname), "wb") as f:
-                    f.write(data)
-                print(f"[FALLBACK] Bild gespeichert: {fname} from {src}")
-                seen.add(src)
-                count += 1
-            except Exception as e:
-                print(f"[FALLBACK ERROR] {e} bei {src}")
+            save_image_from_url(src)
 
     print(f"[RESULT] {count-1} Bilder für {url} gespeichert.")
     return count - 1
+
 
 
 def ocr_translate_images(image_dir, src, tgt):
