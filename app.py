@@ -3,93 +3,81 @@ import re
 import zipfile
 import uuid
 import sys
+import io
 from flask import Flask, request, render_template, send_from_directory, jsonify
 from werkzeug.utils import secure_filename
 from bs4 import BeautifulSoup
 from PIL import Image
+from requests_html import HTMLSession
 import pytesseract
 from deep_translator import GoogleTranslator
 from fpdf import FPDF
-import io
-import requests
-from requests_html import HTMLSession  # NEU
 
-# Logging helper
+# Debug-Print
 def log(s):
     print(s)
     sys.stdout.flush()
 
-# Tesseract konfigurieren
-pytesseract.pytesseract.tesseract_cmd = os.environ.get("TESSERACT_CMD", "tesseract")
-
+# Flask Setup
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = "output"
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-def download_images_from_chapter(url, outdir):
-    os.makedirs(outdir, exist_ok=True)
-    session = HTMLSession()
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Referer": url
-    }
+# Tesseract
+pytesseract.pytesseract.tesseract_cmd = os.environ.get("TESSERACT_CMD", "tesseract")
 
-    log(f"[INFO] Lade Seite: {url}")
+def download_images_from_chapter(url, outdir):
+    log(f"[DOWNLOAD] Starte mit {url}")
+    session = HTMLSession()
     try:
-        r = session.get(url, headers=headers)
-        r.html.render(timeout=20)  # JavaScript ausführen
+        r = session.get(url, timeout=15)
+        r.html.render(timeout=20)
     except Exception as e:
-        log(f"[ERROR] render() fehlgeschlagen: {e}")
+        log(f"[RENDER ERROR] {e}")
         return 0
 
-    images = r.html.find("img")
+    os.makedirs(outdir, exist_ok=True)
     count = 1
     seen = set()
 
-    for img in images:
-        src = img.attrs.get("src") or img.attrs.get("data-src")
-        if not src or not src.startswith("http") or "chapter" not in src:
-            continue
-        if src in seen:
+    for img in r.html.find("img"):
+        src = img.attrs.get("data-src") or img.attrs.get("src")
+        if not src or not src.startswith("http") or src in seen:
             continue
         seen.add(src)
         try:
-            img_data = requests.get(src, headers=headers, timeout=15).content
-            ext = os.path.splitext(src.split("?")[0])[-1]
-            if ext.lower() == ".webp":
-                im = Image.open(io.BytesIO(img_data)).convert("RGB")
-                fname = f"{count:03}.jpg"
-                im.save(os.path.join(outdir, fname), format="JPEG")
-            else:
-                fname = f"{count:03}.{ext.lstrip('.')}" if ext else f"{count:03}.jpg"
-                with open(os.path.join(outdir, fname), "wb") as f:
-                    f.write(img_data)
-            log(f"[✔️] Gespeichert: {fname}")
+            img_data = session.get(src).content
+            ext = src.split("?")[0].split(".")[-1].lower()
+            ext = ext if ext in ['jpg', 'jpeg', 'png'] else 'jpg'
+            filename = f"{count:03}.{ext}"
+            filepath = os.path.join(outdir, filename)
+            with open(filepath, "wb") as f:
+                f.write(img_data)
+            log(f"[BILD] Gespeichert: {filename}")
             count += 1
         except Exception as e:
-            log(f"[FEHLER] Bild konnte nicht geladen werden: {e}")
+            log(f"[IMG ERROR] {e} bei {src}")
 
-    log(f"[RESULT] {count-1} Bilder gespeichert.")
     return count - 1
 
 def ocr_translate_images(image_dir, src, tgt):
     results = []
-    files = sorted([f for f in os.listdir(image_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
-    for f in files:
-        path = os.path.join(image_dir, f)
+    files = sorted(f for f in os.listdir(image_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png')))
+    for fname in files:
+        path = os.path.join(image_dir, fname)
         try:
             text = pytesseract.image_to_string(Image.open(path), lang=None if src == 'auto' else src)
         except Exception as e:
-            log(f"[OCR ERROR] {e} bei {path}")
+            log(f"[OCR ERROR] {e}")
             text = ""
         translated = ""
         if text.strip():
             try:
-                translated = GoogleTranslator(source='auto' if src == 'auto' else src, target=tgt).translate(text)
+                translated = GoogleTranslator(source=src, target=tgt).translate(text)
             except Exception as e:
-                log(f"[TRANSLATE ERROR] {e} für Text von {f}")
-                translated = "[Übersetzung fehlgeschlagen]"
-        results.append((f, translated))
+                log(f"[Übersetzung fehlgeschlagen] {e}")
+                translated = "[Fehler bei Übersetzung]"
+        results.append((fname, translated))
     return results
 
 def create_pdf(translated_list, outpdf):
@@ -103,14 +91,14 @@ def create_pdf(translated_list, outpdf):
         for line in text.split("\n"):
             pdf.multi_cell(0, 8, line)
     pdf.output(outpdf)
-    log(f"[PDF] Erstellt: {outpdf}")
+    log(f"[PDF] Fertig: {outpdf}")
 
 def create_cbz(image_dir, outcbz):
     with zipfile.ZipFile(outcbz, 'w') as z:
         for f in sorted(os.listdir(image_dir)):
             if f.lower().endswith(('.jpg', '.jpeg', '.png')):
                 z.write(os.path.join(image_dir, f), arcname=f)
-    log(f"[CBZ] Erstellt: {outcbz}")
+    log(f"[CBZ] Fertig: {outcbz}")
 
 @app.route("/")
 def index():
@@ -133,10 +121,7 @@ def process():
     for ch in range(start, end + 1):
         chapter_url = f"{url.rstrip('/')}/chapter-{ch}/"
         img_dir = os.path.join(out_root, f"chapter_{ch:02}")
-        num = download_images_from_chapter(chapter_url, img_dir)
-        if num == 0:
-            log(f"[WARNUNG] Keine Bilder gefunden für Kapitel {ch}")
-            continue
+        download_images_from_chapter(chapter_url, img_dir)
         translated = ocr_translate_images(img_dir, src, tgt)
         pdf_path = os.path.join(out_root, f"{title}_Kapitel{ch:02}.pdf")
         create_pdf(translated, pdf_path)
@@ -144,20 +129,13 @@ def process():
         create_cbz(img_dir, cbz_path)
         combined.extend([pdf_path, cbz_path])
 
-        # Debug: Inhalt des Bildordners
-        if os.path.isdir(img_dir):
-            files = sorted(os.listdir(img_dir))
-            log(f"[DEBUG] Inhalt von {img_dir}: {files}")
-        else:
-            log(f"[DEBUG] Ordner fehlt: {img_dir}")
-
     zip_name = f"{title}_{session_id}_export.zip"
     zip_path = os.path.join(out_root, zip_name)
     with zipfile.ZipFile(zip_path, 'w') as z:
         for p in combined:
             if os.path.exists(p):
                 z.write(p, arcname=os.path.basename(p))
-    log(f"[ZIP] Erstellt: {zip_path}")
+    log(f"[ZIP] Exportiert: {zip_path}")
     return jsonify({"zip": zip_path})
 
 @app.route("/download/<path:filename>")
