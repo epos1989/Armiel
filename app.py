@@ -13,24 +13,17 @@ from deep_translator import GoogleTranslator
 from fpdf import FPDF
 import io
 
-# Logging helper, damit Ausgaben sofort im Render-Log auftauchen
+# Logging helper: sofort flushen, damit es in Render-Logs erscheint
 def log(s):
     print(s)
     sys.stdout.flush()
 
-# Tesseract-Pfad (falls nötig anpassen, auf Render sollte "tesseract" funktionieren)
+# Tesseract-Pfad (bei Bedarf anpassen, Render sollte "tesseract" im PATH haben)
 pytesseract.pytesseract.tesseract_cmd = os.environ.get("TESSERACT_CMD", "tesseract")
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = "output"
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-
-import re
-import io
-
-def log(s):
-    print(s)
-    sys.stdout.flush()
 
 def download_images_from_chapter(url, outdir):
     headers = {
@@ -76,14 +69,14 @@ def download_images_from_chapter(url, outdir):
         except Exception as e:
             log(f"[IMAGE ERROR] {e} bei {src_url}")
 
-    # Versuch 1: <img> Tags
+    # Versuch 1: direkte <img>-Quellen
     for img in soup.find_all("img"):
         src = img.get("data-src") or img.get("src")
         if not src or not src.lower().startswith("http"):
             continue
         save_image_from_url(src)
 
-    # Versuch 2: Fallback über Regex
+    # Versuch 2: Fallback über Regex im Rohtext, falls noch keine Bilder
     if count == 1:
         pattern = re.compile(r'(https?://[^"\']+\.(?:jpg|jpeg|png|webp)(?:\?[^"\']*)?)', re.IGNORECASE)
         matches = pattern.findall(r.text)
@@ -102,15 +95,16 @@ def ocr_translate_images(image_dir, src, tgt):
         path = os.path.join(image_dir, f)
         try:
             text = pytesseract.image_to_string(Image.open(path), lang=None if src == 'auto' else src)
-        except Exception:
+        except Exception as e:
+            log(f"[OCR ERROR] {e} bei {path}")
             text = ""
+        translated = ""
         if text.strip():
             try:
                 translated = GoogleTranslator(source='auto' if src == 'auto' else src, target=tgt).translate(text)
-            except:
+            except Exception as e:
+                log(f"[TRANSLATE ERROR] {e} für Text von {f}")
                 translated = "[Übersetzung fehlgeschlagen]"
-        else:
-            translated = ""
         results.append((f, translated))
     return results
 
@@ -125,12 +119,14 @@ def create_pdf(translated_list, outpdf):
         for line in text.split("\n"):
             pdf.multi_cell(0, 8, line)
     pdf.output(outpdf)
+    log(f"[PDF] Erstellt: {outpdf}")
 
 def create_cbz(image_dir, outcbz):
     with zipfile.ZipFile(outcbz, 'w') as z:
         for f in sorted(os.listdir(image_dir)):
             if f.lower().endswith(('.jpg', '.jpeg', '.png')):
                 z.write(os.path.join(image_dir, f), arcname=f)
+    log(f"[CBZ] Erstellt: {outcbz}")
 
 @app.route("/")
 def index():
@@ -149,6 +145,7 @@ def process():
     out_root = os.path.join(app.config['UPLOAD_FOLDER'], f"{title}_{session_id}")
     os.makedirs(out_root, exist_ok=True)
     combined = []
+
     for ch in range(start, end + 1):
         chapter_url = f"{url.rstrip('/')}/chapter-{ch}/"
         img_dir = os.path.join(out_root, f"chapter_{ch:02}")
@@ -159,12 +156,21 @@ def process():
         cbz_path = os.path.join(out_root, f"{title}_Kapitel{ch:02}.cbz")
         create_cbz(img_dir, cbz_path)
         combined.extend([pdf_path, cbz_path])
+
+        # Debug: Inhalt des Bildordners ausgeben
+        if os.path.isdir(img_dir):
+            files = sorted(os.listdir(img_dir))
+            log(f"[DEBUG] Inhalt von {img_dir}: {files}")
+        else:
+            log(f"[DEBUG] Ordner fehlt: {img_dir}")
+
     zip_name = f"{title}_{session_id}_export.zip"
     zip_path = os.path.join(out_root, zip_name)
     with zipfile.ZipFile(zip_path, 'w') as z:
         for p in combined:
             if os.path.exists(p):
                 z.write(p, arcname=os.path.basename(p))
+    log(f"[ZIP] Erstellt: {zip_path}")
     return jsonify({"zip": zip_path})
 
 @app.route("/download/<path:filename>")
@@ -172,6 +178,5 @@ def dl(filename):
     return send_from_directory(".", filename, as_attachment=True)
 
 if __name__ == "__main__":
-    import os
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
