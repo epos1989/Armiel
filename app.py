@@ -1,147 +1,77 @@
+from flask import Flask, request, render_template_string, send_file
+from playwright.sync_api import sync_playwright
 import os
-import re
+import shutil
+import requests
 import zipfile
-import uuid
-import sys
-import io
-from flask import Flask, request, render_template, send_from_directory, jsonify
-from werkzeug.utils import secure_filename
-from bs4 import BeautifulSoup
-from PIL import Image
-from requests_html import HTMLSession
-import pytesseract
-from deep_translator import GoogleTranslator
-from fpdf import FPDF
 
-# Debug-Print
-def log(s):
-    print(s)
-    sys.stdout.flush()
-
-# Flask Setup
 app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = "output"
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-# Tesseract
-pytesseract.pytesseract.tesseract_cmd = os.environ.get("TESSERACT_CMD", "tesseract")
+HTML = """
+<!doctype html>
+<title>Toongod Downloader</title>
+<h1>Toongod Kapitel Downloader</h1>
+<form method=post>
+  Kapitel-URL: <input type=text name=url style="width: 500px;">
+  <input type=submit value=Download>
+</form>
+{% if zip_url %}
+  <p>Download fertig: <a href="{{ zip_url }}">Hier klicken</a></p>
+{% endif %}
+"""
 
-def download_images_from_chapter(url, outdir):
-    log(f"[DOWNLOAD] Starte mit {url}")
-    session = HTMLSession()
-    try:
-        r = session.get(url, timeout=15)
-        r.html.render(timeout=20)
-    except Exception as e:
-        log(f"[RENDER ERROR] {e}")
-        return 0
+def download_image(url, path):
+    r = requests.get(url, stream=True)
+    if r.status_code == 200:
+        with open(path, "wb") as f:
+            shutil.copyfileobj(r.raw, f)
+        print(f"Downloaded {url}")
+    else:
+        print(f"Failed to download {url}")
 
-    os.makedirs(outdir, exist_ok=True)
-    count = 1
-    seen = set()
+def scrape_images(chapter_url, folder):
+    os.makedirs(folder, exist_ok=True)
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.goto(chapter_url)
+        page.wait_for_selector("img.img-fluid")
+        imgs = page.query_selector_all("img.img-fluid")
+        print(f"Gefundene Bilder: {len(imgs)}")
+        for i, img in enumerate(imgs, start=1):
+            src = img.get_attribute("src")
+            if src:
+                download_image(src, os.path.join(folder, f"page_{i}.jpg"))
+        browser.close()
 
-    for img in r.html.find("img"):
-        src = img.attrs.get("data-src") or img.attrs.get("src")
-        if not src or not src.startswith("http") or src in seen:
-            continue
-        seen.add(src)
-        try:
-            img_data = session.get(src).content
-            ext = src.split("?")[0].split(".")[-1].lower()
-            ext = ext if ext in ['jpg', 'jpeg', 'png'] else 'jpg'
-            filename = f"{count:03}.{ext}"
-            filepath = os.path.join(outdir, filename)
-            with open(filepath, "wb") as f:
-                f.write(img_data)
-            log(f"[BILD] Gespeichert: {filename}")
-            count += 1
-        except Exception as e:
-            log(f"[IMG ERROR] {e} bei {src}")
+def make_zip(folder, zip_path):
+    with zipfile.ZipFile(zip_path, "w") as zipf:
+        for filename in os.listdir(folder):
+            file_path = os.path.join(folder, filename)
+            zipf.write(file_path, filename)
+    print(f"ZIP erstellt: {zip_path}")
 
-    return count - 1
-
-def ocr_translate_images(image_dir, src, tgt):
-    results = []
-    files = sorted(f for f in os.listdir(image_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png')))
-    for fname in files:
-        path = os.path.join(image_dir, fname)
-        try:
-            text = pytesseract.image_to_string(Image.open(path), lang=None if src == 'auto' else src)
-        except Exception as e:
-            log(f"[OCR ERROR] {e}")
-            text = ""
-        translated = ""
-        if text.strip():
-            try:
-                translated = GoogleTranslator(source=src, target=tgt).translate(text)
-            except Exception as e:
-                log(f"[Übersetzung fehlgeschlagen] {e}")
-                translated = "[Fehler bei Übersetzung]"
-        results.append((fname, translated))
-    return results
-
-def create_pdf(translated_list, outpdf):
-    pdf = FPDF()
-    pdf.set_auto_page_break(auto=True, margin=15)
-    for fname, text in translated_list:
-        pdf.add_page()
-        pdf.set_font("Arial", "B", 14)
-        pdf.cell(0, 10, f"Seite: {fname}", ln=1)
-        pdf.set_font("Arial", "", 12)
-        for line in text.split("\n"):
-            pdf.multi_cell(0, 8, line)
-    pdf.output(outpdf)
-    log(f"[PDF] Fertig: {outpdf}")
-
-def create_cbz(image_dir, outcbz):
-    with zipfile.ZipFile(outcbz, 'w') as z:
-        for f in sorted(os.listdir(image_dir)):
-            if f.lower().endswith(('.jpg', '.jpeg', '.png')):
-                z.write(os.path.join(image_dir, f), arcname=f)
-    log(f"[CBZ] Fertig: {outcbz}")
-
-@app.route("/")
+@app.route("/", methods=["GET", "POST"])
 def index():
-    return render_template("index.html")
+    zip_url = None
+    if request.method == "POST":
+        url = request.form.get("url")
+        if url:
+            folder = "temp_images"
+            zip_path = "output.zip"
+            if os.path.exists(folder):
+                shutil.rmtree(folder)
+            scrape_images(url, folder)
+            make_zip(folder, zip_path)
+            zip_url = "/download"
+    return render_template_string(HTML, zip_url=zip_url)
 
-@app.route("/process", methods=["POST"])
-def process():
-    data = request.form
-    url = data.get("url")
-    start = int(data.get("start", 1))
-    end = int(data.get("end", 1))
-    src = data.get("src", "auto")
-    tgt = data.get("tgt", "de")
-    session_id = str(uuid.uuid4())[:8]
-    title = secure_filename(url.strip("/").split("/")[-2])
-    out_root = os.path.join(app.config['UPLOAD_FOLDER'], f"{title}_{session_id}")
-    os.makedirs(out_root, exist_ok=True)
-    combined = []
-
-    for ch in range(start, end + 1):
-        chapter_url = f"{url.rstrip('/')}/chapter-{ch}/"
-        img_dir = os.path.join(out_root, f"chapter_{ch:02}")
-        download_images_from_chapter(chapter_url, img_dir)
-        translated = ocr_translate_images(img_dir, src, tgt)
-        pdf_path = os.path.join(out_root, f"{title}_Kapitel{ch:02}.pdf")
-        create_pdf(translated, pdf_path)
-        cbz_path = os.path.join(out_root, f"{title}_Kapitel{ch:02}.cbz")
-        create_cbz(img_dir, cbz_path)
-        combined.extend([pdf_path, cbz_path])
-
-    zip_name = f"{title}_{session_id}_export.zip"
-    zip_path = os.path.join(out_root, zip_name)
-    with zipfile.ZipFile(zip_path, 'w') as z:
-        for p in combined:
-            if os.path.exists(p):
-                z.write(p, arcname=os.path.basename(p))
-    log(f"[ZIP] Exportiert: {zip_path}")
-    return jsonify({"zip": zip_path})
-
-@app.route("/download/<path:filename>")
-def dl(filename):
-    return send_from_directory(".", filename, as_attachment=True)
+@app.route("/download")
+def download():
+    path = "output.zip"
+    if os.path.exists(path):
+        return send_file(path, as_attachment=True)
+    return "Datei nicht gefunden", 404
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=10000)
