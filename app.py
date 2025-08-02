@@ -15,52 +15,66 @@ app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = "output"
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
+import re
+
 def download_images_from_chapter(url, outdir):
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+    }
     try:
         r = requests.get(url, headers=headers, timeout=15)
+        r.raise_for_status()
     except Exception as e:
-        print(f"Fehler beim Laden der Kapitel-URL {url}: {e}")
+        print(f"[DOWNLOAD ERROR] Kapitel-URL laden fehlgeschlagen: {e}")
         return 0
+
     soup = BeautifulSoup(r.text, 'html.parser')
     os.makedirs(outdir, exist_ok=True)
     count = 1
+    seen = set()
 
-    # Versuch 1: alle sichtbaren <img>-Tags
-    img_tags = soup.find_all("img")
-    for img in img_tags:
+    # Versuch 1: <img> Tags mit src / data-src
+    for img in soup.find_all("img"):
         src = img.get("data-src") or img.get("src")
         if not src or not src.startswith("http"):
             continue
+        if src in seen:
+            continue
+        seen.add(src)
         try:
             data = requests.get(src, headers=headers, timeout=15).content
             fname = f"{count:03}.jpg"
             with open(os.path.join(outdir, fname), "wb") as f:
                 f.write(data)
+            print(f"[DOWNLOAD] Bild gespeichert: {fname} from {src}")
             count += 1
-        except:
-            continue
+        except Exception as e:
+            print(f"[IMAGE ERROR] {e} bei {src}")
 
-    # Versuch 2: falls JS-Rendering nötig, suche in scripts nach Bild-URLs (einfacher Fall)
+    # Versuch 2: Bild-URLs aus JS/HTML-Quelltext extrahieren (Fallback)
     if count == 1:
-        text = r.text
-        possible = set()
-        for part in text.split('"'):
-            if part.lower().startswith("http") and any(ext in part.lower() for ext in [".jpg", ".jpeg", ".png"]):
-                possible.add(part)
-        for src in sorted(possible):
-            if count > 200:  # Sicherheitslimit
+        # Regex für häufige Bild-Endungen
+        pattern = re.compile(r'(https?://[^"\']+\.(?:jpg|jpeg|png)(?:\?[^"\']*)?)', re.IGNORECASE)
+        matches = pattern.findall(r.text)
+        for src in sorted(set(matches)):
+            if src in seen:
+                continue
+            if count > 200:  # Safety cap
                 break
             try:
                 data = requests.get(src, headers=headers, timeout=15).content
                 fname = f"{count:03}.jpg"
                 with open(os.path.join(outdir, fname), "wb") as f:
                     f.write(data)
+                print(f"[FALLBACK] Bild gespeichert: {fname} from {src}")
+                seen.add(src)
                 count += 1
-            except:
-                continue
+            except Exception as e:
+                print(f"[FALLBACK ERROR] {e} bei {src}")
 
+    print(f"[RESULT] {count-1} Bilder für {url} gespeichert.")
     return count - 1
+
 
 def ocr_translate_images(image_dir, src, tgt):
     results = []
