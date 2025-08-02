@@ -23,21 +23,43 @@ def download_images_from_chapter(url, outdir):
         print(f"Fehler beim Laden der Kapitel-URL {url}: {e}")
         return 0
     soup = BeautifulSoup(r.text, 'html.parser')
-    imgs = soup.find_all("img")
     os.makedirs(outdir, exist_ok=True)
     count = 1
-    for img in imgs:
-        src = img.get("src") or img.get("data-src")
+
+    # Versuch 1: alle sichtbaren <img>-Tags
+    img_tags = soup.find_all("img")
+    for img in img_tags:
+        src = img.get("data-src") or img.get("src")
         if not src or not src.startswith("http"):
             continue
         try:
             data = requests.get(src, headers=headers, timeout=15).content
             fname = f"{count:03}.jpg"
-            with open(os.path.join(outdir, fname), 'wb') as f:
+            with open(os.path.join(outdir, fname), "wb") as f:
                 f.write(data)
             count += 1
         except:
             continue
+
+    # Versuch 2: falls JS-Rendering nötig, suche in scripts nach Bild-URLs (einfacher Fall)
+    if count == 1:
+        text = r.text
+        possible = set()
+        for part in text.split('"'):
+            if part.lower().startswith("http") and any(ext in part.lower() for ext in [".jpg", ".jpeg", ".png"]):
+                possible.add(part)
+        for src in sorted(possible):
+            if count > 200:  # Sicherheitslimit
+                break
+            try:
+                data = requests.get(src, headers=headers, timeout=15).content
+                fname = f"{count:03}.jpg"
+                with open(os.path.join(outdir, fname), "wb") as f:
+                    f.write(data)
+                count += 1
+            except:
+                continue
+
     return count - 1
 
 def ocr_translate_images(image_dir, src, tgt):
