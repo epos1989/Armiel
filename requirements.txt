@@ -1,4 +1,5 @@
 flask
+playwright
 requests
 beautifulsoup4
 pillow
