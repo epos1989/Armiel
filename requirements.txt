@@ -1,0 +1,8 @@
+flask
+requests
+beautifulsoup4
+pillow
+pytesseract
+deep-translator
+fpdf
+werkzeug
