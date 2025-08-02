@@ -25,6 +25,13 @@ app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = "output"
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
+import re
+import io
+
+def log(s):
+    print(s)
+    sys.stdout.flush()
+
 def download_images_from_chapter(url, outdir):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
@@ -69,14 +76,14 @@ def download_images_from_chapter(url, outdir):
         except Exception as e:
             log(f"[IMAGE ERROR] {e} bei {src_url}")
 
-    # Versuch 1: direkte <img>-Quellen
+    # Versuch 1: <img> Tags
     for img in soup.find_all("img"):
         src = img.get("data-src") or img.get("src")
         if not src or not src.lower().startswith("http"):
             continue
         save_image_from_url(src)
 
-    # Versuch 2: Fallback via Regex (wenn noch keine Bilder)
+    # Versuch 2: Fallback über Regex
     if count == 1:
         pattern = re.compile(r'(https?://[^"\']+\.(?:jpg|jpeg|png|webp)(?:\?[^"\']*)?)', re.IGNORECASE)
         matches = pattern.findall(r.text)
@@ -87,8 +94,6 @@ def download_images_from_chapter(url, outdir):
 
     log(f"[RESULT] {count-1} Bilder für {url} gespeichert.")
     return count - 1
-
-
 
 def ocr_translate_images(image_dir, src, tgt):
     results = []
