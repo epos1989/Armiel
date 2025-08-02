@@ -1,33 +1,40 @@
-from flask import Flask, request, render_template, send_from_directory, jsonify
-import os, zipfile, uuid
-from werkzeug.utils import secure_filename
+import os
+import re
+import zipfile
+import uuid
+import sys
 import requests
+from flask import Flask, request, render_template, send_from_directory, jsonify
+from werkzeug.utils import secure_filename
 from bs4 import BeautifulSoup
 from PIL import Image
 import pytesseract
 from deep_translator import GoogleTranslator
 from fpdf import FPDF
+import io
 
-# Tesseract-Pfad (wenn lokal installiert, reicht "tesseract"; bei portablem fallback ggf anpassen)
+# Logging helper, damit Ausgaben sofort im Render-Log auftauchen
+def log(s):
+    print(s)
+    sys.stdout.flush()
+
+# Tesseract-Pfad (falls nötig anpassen, auf Render sollte "tesseract" funktionieren)
 pytesseract.pytesseract.tesseract_cmd = os.environ.get("TESSERACT_CMD", "tesseract")
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = "output"
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-import re
-from PIL import Image
-import io
-
 def download_images_from_chapter(url, outdir):
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Referer": url
     }
     try:
         r = requests.get(url, headers=headers, timeout=15)
         r.raise_for_status()
     except Exception as e:
-        print(f"[DOWNLOAD ERROR] Kapitel-URL laden fehlgeschlagen: {e}")
+        log(f"[DOWNLOAD ERROR] Kapitel-URL laden fehlgeschlagen: {e}")
         return 0
 
     soup = BeautifulSoup(r.text, "html.parser")
@@ -51,25 +58,25 @@ def download_images_from_chapter(url, outdir):
                     fname = f"{count:03}.jpg"
                     im.save(os.path.join(outdir, fname), format="JPEG")
                 except Exception as e:
-                    print(f"[CONVERT ERROR] WebP zu JPG fehlgeschlagen: {e}")
+                    log(f"[CONVERT ERROR] WebP zu JPG fehlgeschlagen: {e}")
                     return
             else:
                 fname = f"{count:03}.{ext if ext in ['jpg','jpeg','png'] else 'jpg'}"
                 with open(os.path.join(outdir, fname), "wb") as f:
                     f.write(content)
-            print(f"[DOWNLOAD] Bild gespeichert: {fname} from {src_url}")
+            log(f"[DOWNLOAD] Bild gespeichert: {fname} from {src_url}")
             count += 1
         except Exception as e:
-            print(f"[IMAGE ERROR] {e} bei {src_url}")
+            log(f"[IMAGE ERROR] {e} bei {src_url}")
 
-    # Versuch 1: direkte <img> Quellen
+    # Versuch 1: direkte <img>-Quellen
     for img in soup.find_all("img"):
         src = img.get("data-src") or img.get("src")
         if not src or not src.lower().startswith("http"):
             continue
         save_image_from_url(src)
 
-    # Versuch 2: Fallback per Regex im Rohtext
+    # Versuch 2: Fallback via Regex (wenn noch keine Bilder)
     if count == 1:
         pattern = re.compile(r'(https?://[^"\']+\.(?:jpg|jpeg|png|webp)(?:\?[^"\']*)?)', re.IGNORECASE)
         matches = pattern.findall(r.text)
@@ -78,7 +85,7 @@ def download_images_from_chapter(url, outdir):
                 break
             save_image_from_url(src)
 
-    print(f"[RESULT] {count-1} Bilder für {url} gespeichert.")
+    log(f"[RESULT] {count-1} Bilder für {url} gespeichert.")
     return count - 1
 
 
